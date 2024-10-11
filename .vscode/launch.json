@@ -1,0 +1,16 @@
+{
+    "configurations": [
+        {
+            "name": "plant_analyzer (Flutter)",
+            "program": "lib/main.dart",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "plant_analyzer (Flutter)",
+            "program": "lib/main.dart",
+            "request": "launch",
+            "type": "dart"
+        }
+    ]
+}
