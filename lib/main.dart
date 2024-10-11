@@ -1,17 +1,21 @@
 import 'dart:io';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:http/io_client.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
-Future<void> main() async {
-  try {
-    await dotenv.load(fileName: "assets/.env");
-  } catch (e) {
-    print("Erreur lors du chargement du fichier .env : $e");
-  }
+void main() async {
+  await dotenv.load(fileName: "assets/.env");
   runApp(const MyApp());
+}
+
+Future<http.Client> getHttpClient() async {
+  final ioc = HttpClient()
+    ..badCertificateCallback =
+        (X509Certificate cert, String host, int port) => true;
+  return IOClient(ioc);
 }
 
 class MyApp extends StatelessWidget {
@@ -21,9 +25,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Évaluation de Santé des Plantes',
-      theme: ThemeData(
-        primarySwatch: Colors.green,
-      ),
+      theme: ThemeData(primarySwatch: Colors.green),
       home: const MyHomePage(title: 'Évaluez la santé de votre plante'),
     );
   }
@@ -42,7 +44,6 @@ class _MyHomePageState extends State<MyHomePage> {
   File? _image;
   final ImagePicker _picker = ImagePicker();
   String _result = "";
-  String _plantName = ""; // Nom de la plante identifiée
   String _healthStatus = '';
   bool _isLoading = false;
 
@@ -53,7 +54,6 @@ class _MyHomePageState extends State<MyHomePage> {
         _image = File(pickedFile.path);
         _result = "";
         _healthStatus = '';
-        _plantName = '';
       });
     }
   }
@@ -65,14 +65,12 @@ class _MyHomePageState extends State<MyHomePage> {
       _isLoading = true;
       _result = "";
       _healthStatus = '';
-      _plantName = '';
     });
 
     try {
       List<int> imageBytes = await _image!.readAsBytes();
       String base64Image = base64Encode(imageBytes);
 
-      // Préparez les données de la requête comme dans le code Python
       Map<String, dynamic> data = {
         'images': ['data:image/jpeg;base64,$base64Image'],
         'latitude': 49.207,
@@ -80,7 +78,8 @@ class _MyHomePageState extends State<MyHomePage> {
         'similar_images': true,
       };
 
-      var response = await http.post(
+      var client = await getHttpClient();
+      var response = await client.post(
         Uri.parse('https://plant.id/api/v3/health_assessment'),
         headers: {
           'Content-Type': 'application/json',
@@ -91,11 +90,10 @@ class _MyHomePageState extends State<MyHomePage> {
 
       if (response.statusCode == 200 || response.statusCode == 201) {
         var decodedData = json.decode(response.body);
-        _processApiResponse(decodedData);
+        await _processApiResponse(decodedData);
       } else {
         setState(() {
           _result = "Échec de l'analyse. Code ${response.statusCode}";
-          print("Erreur: ${response.statusCode}, Réponse: ${response.body}");
         });
       }
     } catch (e) {
@@ -109,41 +107,91 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
-  void _processApiResponse(Map<String, dynamic> data) {
+  Future<void> _processApiResponse(Map<String, dynamic> data) async {
+    bool isHealthy = data['result']['is_healthy']['binary'];
+    double healthProbability =
+        data['result']['is_healthy']['probability'] * 100;
+
     setState(() {
-      // Identification de la plante retirée, analyse directe de l'état de santé
-      bool isHealthy = data['result']['is_healthy']['binary'];
-      double healthProbability =
-          data['result']['is_healthy']['probability'] * 100;
+      _healthStatus = isHealthy
+          ? 'La plante est en bonne santé (Probabilité : ${healthProbability.toStringAsFixed(2)}%)'
+          : 'La plante présente des problèmes de santé (Probabilité : ${healthProbability.toStringAsFixed(2)}%).';
+    });
 
-      if (isHealthy) {
-        _healthStatus =
-            'La plante est en bonne santé (Probabilité : ${healthProbability.toStringAsFixed(2)}%)';
-      } else {
-        _healthStatus =
-            'La plante présente des problèmes de santé (Probabilité : ${healthProbability.toStringAsFixed(2)}%).';
+    if (data['result']['disease'] != null &&
+        data['result']['disease']['suggestions'] != null) {
+      var diseaseSuggestions = data['result']['disease']['suggestions'];
+      List<String> diseaseNames = diseaseSuggestions
+          .map<String>((suggestion) => suggestion['name'].toString())
+          .toList();
 
-        if (data['result']['disease'] != null &&
-            data['result']['disease']['suggestions'] != null) {
-          var diseaseSuggestions = data['result']['disease']['suggestions'];
-          StringBuffer suggestionsBuffer = StringBuffer();
-          for (var suggestion in diseaseSuggestions) {
-            suggestionsBuffer.writeln(
-                '${suggestion['name']} avec une probabilité de ${(suggestion['probability'] * 100).toStringAsFixed(2)}%');
-          }
-          _healthStatus +=
-              '\nProblèmes suggérés :\n' + suggestionsBuffer.toString();
-        }
+      try {
+        Map<String, String> translations =
+            await translateDiseaseNames(diseaseNames);
+        _updateDiseaseStatus(diseaseSuggestions, translations);
+      } catch (e) {
+        print('Erreur lors de la traduction : $e');
+        _updateDiseaseStatus(diseaseSuggestions, {});
       }
+    }
+  }
+
+  Future<Map<String, String>> translateDiseaseNames(
+      List<String> diseaseNames) async {
+    try {
+      final client = await getHttpClient();
+      final url = Uri.parse('https://urbano.pythonanywhere.com/translate/');
+
+      print('Envoi de la requête à : $url');
+      print('Noms de maladies à traduire : $diseaseNames');
+
+      final response = await client.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({'disease_names': diseaseNames}),
+      );
+
+      print('Code de statut de la réponse : ${response.statusCode}');
+      print('Corps de la réponse : ${response.body}');
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['translations'] != null) {
+          return Map<String, String>.from(data['translations']);
+        } else {
+          throw Exception(
+              'La clé "translations" est manquante dans la réponse.');
+        }
+      } else {
+        throw Exception(
+            'Erreur de l\'API de traduction : ${response.statusCode}');
+      }
+    } catch (e) {
+      print('Exception lors de la traduction : $e');
+      rethrow;
+    }
+  }
+
+  void _updateDiseaseStatus(
+      List<dynamic> suggestions, Map<String, String> translations) {
+    StringBuffer suggestionsBuffer = StringBuffer();
+    for (var suggestion in suggestions) {
+      String englishName = suggestion['name'].toString();
+      String displayName = translations[englishName] ?? englishName;
+      suggestionsBuffer.writeln(
+          '$displayName avec une probabilité de ${(suggestion['probability'] * 100).toStringAsFixed(2)}%');
+    }
+
+    setState(() {
+      _healthStatus +=
+          '\n\nProblèmes suggérés :\n' + suggestionsBuffer.toString();
     });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.title),
-      ),
+      appBar: AppBar(title: Text(widget.title)),
       body: SingleChildScrollView(
         child: Center(
           child: Padding(
